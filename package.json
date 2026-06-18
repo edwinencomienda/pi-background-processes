@@ -1,0 +1,23 @@
+{
+  "name": "pi-background-processes",
+  "version": "0.1.0",
+  "description": "Pi extension for managing dev servers and other background processes.",
+  "type": "module",
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "background-processes",
+    "dev-server"
+  ],
+  "license": "MIT",
+  "pi": {
+    "extensions": [
+      "./extensions/background-processes.ts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  }
+}
