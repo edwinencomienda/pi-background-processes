@@ -17,6 +17,7 @@ import { StringEnum } from "@earendil-works/pi-ai";
 import { Type } from "typebox";
 
 type BackgroundAction = "start" | "stop" | "status" | "list" | "logs" | "forget";
+type ProcessScope = "project" | "owned" | "all";
 type StopSignal = "SIGTERM" | "SIGINT" | "SIGKILL";
 
 type BackgroundProcessInput = {
@@ -26,6 +27,7 @@ type BackgroundProcessInput = {
 	cwd?: string;
 	restart?: boolean;
 	lines?: number;
+	scope?: ProcessScope;
 	signal?: StopSignal;
 };
 
@@ -55,6 +57,12 @@ const processSchema = Type.Object({
 	cwd: Type.Optional(Type.String({ description: "Working directory. Defaults to the current Pi cwd." })),
 	restart: Type.Optional(Type.Boolean({ description: "For action=start, stop an existing running process first." })),
 	lines: Type.Optional(Type.Number({ description: "For action=logs, max log lines to return. Defaults to 120." })),
+	scope: Type.Optional(
+		StringEnum(["project", "owned", "all"] as const, {
+			description:
+				"For action=list, which records to show. project shows this cwd/project, owned shows this Pi session, all shows every tracked process. Defaults to project.",
+		}),
+	),
 	signal: Type.Optional(
 		StringEnum(["SIGTERM", "SIGINT", "SIGKILL"] as const, { description: "Signal for action=stop." }),
 	),
@@ -173,6 +181,24 @@ function formatRecord(record: ProcessRecord): string {
 	return `${record.name} [${statusOf(record)}] pid=${record.pid}\n  command: ${record.command}\n  cwd: ${record.cwd}\n  log: ${record.logFile}`;
 }
 
+function isSameOrNestedPath(first: string, second: string): boolean {
+	const a = resolve(first);
+	const b = resolve(second);
+	return a === b || a.startsWith(`${b}/`) || b.startsWith(`${a}/`);
+}
+
+function filterRecords(records: ProcessRecord[], scope: ProcessScope, cwd: string, ownerId: string): ProcessRecord[] {
+	switch (scope) {
+		case "owned":
+			return records.filter((record) => record.ownerId === ownerId);
+		case "all":
+			return records;
+		case "project":
+		default:
+			return records.filter((record) => isSameOrNestedPath(record.cwd, cwd));
+	}
+}
+
 async function tailLog(file: string, maxLines: number) {
 	if (!existsSync(file)) return "No log file found.";
 	const full = await readFile(file, "utf8");
@@ -192,13 +218,14 @@ async function tailLog(file: string, maxLines: number) {
 
 type StatusContext = {
 	hasUI: boolean;
+	cwd: string;
 	ui: { setStatus: (key: string, value?: string) => void };
 };
 
 async function updateBackgroundStatus(ctx: StatusContext) {
 	if (!ctx.hasUI) return;
 
-	const records = await listRecords();
+	const records = filterRecords(await listRecords(), "project", ctx.cwd, "");
 	const running = records.filter((record) => statusOf(record) === "running");
 	ctx.ui.setStatus(
 		"background-processes",
@@ -232,6 +259,7 @@ export default function (pi: ExtensionAPI) {
 		promptSnippet: "Manage detached background processes such as dev servers, API servers, workers, and docs servers.",
 		promptGuidelines: [
 			"Use background_process with action=start for long-running commands like dev servers instead of bash, unless the user specifically asks for tmux.",
+			"Use background_process with action=list and scope=project to see background processes already managed for the current project, including processes started by other Pi agents on this machine.",
 			"Use background_process with action=logs or action=status to inspect a started server before assuming it is healthy.",
 			"Use stable background_process names like devserver, api, worker, or docs so later turns can stop or inspect them.",
 		],
@@ -242,10 +270,13 @@ export default function (pi: ExtensionAPI) {
 
 			try {
 				if (params.action === "list") {
-				const records = await listRecords();
-				const text = records.length ? records.map(formatRecord).join("\n\n") : "No background processes are tracked.";
-				return { content: [{ type: "text", text }], details: { records } };
-			}
+					const scope = params.scope ?? "project";
+					const records = filterRecords(await listRecords(), scope, ctx.cwd, currentOwnerId);
+					const text = records.length
+						? records.map(formatRecord).join("\n\n")
+						: `No background processes are tracked for scope=${scope}.`;
+					return { content: [{ type: "text", text }], details: { records, scope } };
+				}
 
 			const name = params.name?.trim() || "devserver";
 			const existing = await readRecord(name);
@@ -354,13 +385,18 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	pi.registerCommand("processes", {
-		description: "Show tracked background processes",
-		handler: async (_args, ctx) => {
-			const records = await listRecords();
-			const text = records.length ? records.map(formatRecord).join("\n\n") : "No background processes are tracked.";
+		description: "Show tracked background processes for this project. Use /processes all or /processes owned to change scope.",
+		handler: async (args, ctx) => {
+			const requestedScope = args.trim() as ProcessScope;
+			const scope: ProcessScope = ["project", "owned", "all"].includes(requestedScope) ? requestedScope : "project";
+			const ownerId = ownerIdFromSession(ctx);
+			const records = filterRecords(await listRecords(), scope, ctx.cwd, ownerId);
+			const text = records.length
+				? records.map(formatRecord).join("\n\n")
+				: `No background processes are tracked for scope=${scope}.`;
 			if (ctx.hasUI) {
 				ctx.ui.setWidget("background-processes", text.split("\n"));
-				ctx.ui.notify(`Background processes: ${records.length}`, "info");
+				ctx.ui.notify(`Background processes (${scope}): ${records.length}`, "info");
 			}
 		},
 	});
